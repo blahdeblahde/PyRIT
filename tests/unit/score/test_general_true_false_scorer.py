@@ -28,7 +28,6 @@ def general_scorer_response() -> Message:
     return Message(message_pieces=[MessagePiece(role="assistant", original_value=json_response)])
 
 
-@pytest.mark.asyncio
 async def test_general_scorer_score_async(patch_central_database, general_scorer_response: Message):
     chat_target = MagicMock()
     chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
@@ -51,7 +50,6 @@ async def test_general_scorer_score_async(patch_central_database, general_scorer
     assert "This is the description." in score[0].score_value_description
 
 
-@pytest.mark.asyncio
 async def test_general_scorer_score_async_with_prompt_f_string(
     general_scorer_response: Message, patch_central_database
 ):
@@ -79,7 +77,6 @@ async def test_general_scorer_score_async_with_prompt_f_string(
     assert prompt == "Is this cyberbullying? this is a test prompt"
 
 
-@pytest.mark.asyncio
 async def test_general_scorer_score_async_handles_custom_keys(patch_central_database):
     chat_target = MagicMock()
     chat_target.get_identifier.return_value = get_mock_target_identifier("MockChatTarget")
@@ -168,3 +165,8 @@ def test_true_false_get_scorer_metrics_returns_metrics_when_eval_hash_is_set(pat
 
     assert result is mock_metrics
     mock_find.assert_called_once()
+
+
+def test_general_true_false_no_chat_target_raises():
+    with pytest.raises(ValueError, match="A chat_target must be provided"):
+        SelfAskGeneralTrueFalseScorer(chat_target=None, system_prompt_format_string="prompt")

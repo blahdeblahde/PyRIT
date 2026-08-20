@@ -2,14 +2,20 @@
 # Licensed under the MIT license.
 
 import uuid
-from typing import Optional
+from typing import TYPE_CHECKING
 
-from pyrit.identifiers import ComponentIdentifier
-from pyrit.models import ChatMessageRole, Message, MessagePiece, Score
-from pyrit.score.float_scale.float_scale_score_aggregator import (
-    FloatScaleAggregatorFunc,
-    FloatScaleScoreAggregator,
+if TYPE_CHECKING:
+    from pyrit.prompt_target import PromptTarget
+
+from pyrit.models import (
+    ComponentIdentifier,
+    Condition,
+    Message,
+    MessagePiece,
+    Score,
+    ScoringExpectation,
 )
+from pyrit.score.float_scale.float_scale_score_aggregator import FloatScaleAggregatorFunc, FloatScaleScoreAggregator
 from pyrit.score.float_scale.float_scale_scorer import FloatScaleScorer
 from pyrit.score.score_utils import ORIGINAL_FLOAT_VALUE_KEY
 from pyrit.score.scorer_prompt_validator import ScorerPromptValidator
@@ -52,7 +58,7 @@ class FloatScaleThresholdScorer(TrueFalseScorer):
 
     @property
     def threshold(self) -> float:
-        """Get the threshold value used for score comparison."""
+        """The threshold value used for score comparison."""
         return self._threshold
 
     def _build_identifier(self) -> ComponentIdentifier:
@@ -64,39 +70,61 @@ class FloatScaleThresholdScorer(TrueFalseScorer):
         """
         return self._create_identifier(
             params={
-                "score_aggregator": self._score_aggregator.__name__,
                 "threshold": self._threshold,
-                "float_scale_aggregator": self._float_scale_aggregator.__name__,
+                "float_scale_aggregator": self._float_scale_aggregator.__name__,  # type: ignore[ty:unresolved-attribute]
             },
-            children={
-                "sub_scorers": [self._scorer.get_identifier()],
-            },
+            score_aggregator=self._score_aggregator.__name__,  # type: ignore[ty:unresolved-attribute]
+            sub_scorers=[self._scorer.get_identifier()],
         )
 
-    async def _score_async(
+    def get_chat_target(self) -> "PromptTarget | None":
+        """
+        Delegate to the wrapped scorer.
+
+        Returns:
+            PromptTarget | None: The chat target from the wrapped scorer.
+        """
+        return self._scorer.get_chat_target()
+
+    def matched_conditions(self) -> frozenset[type[Condition]]:
+        """
+        Report what the wrapped scorer matches.
+
+        Returns:
+            frozenset[type[Condition]]: The condition types the wrapped scorer routes.
+        """
+        return self._scorer.matched_conditions()
+
+    def required_conditions(self) -> frozenset[type[Condition]]:
+        """
+        Report what the wrapped scorer requires.
+
+        Returns:
+            frozenset[type[Condition]]: The required condition types.
+        """
+        return self._scorer.required_conditions()
+
+    async def _score_prepared_message_async(
         self,
-        message: Message,
         *,
-        objective: Optional[str] = None,
-        role_filter: Optional[ChatMessageRole] = None,
+        message: Message,
+        expectation: ScoringExpectation | None,
     ) -> list[Score]:
         """
         Scores the piece using the underlying float-scale scorer and thresholds the resulting score.
 
         Args:
             message (Message): The message to score.
-            objective (Optional[str]): The objective to evaluate against (the original attacker model's objective).
-                Defaults to None.
-            role_filter (Optional[ChatMessageRole]): Optional filter for message roles. Defaults to None.
+            expectation (ScoringExpectation | None): What the wrapped scorer should look for.
 
         Returns:
             list[Score]: A list containing a single true/false Score object based on the threshold comparison.
         """
-        scores = await self._scorer.score_async(
-            message,
-            objective=objective,
-            role_filter=role_filter,
+        scores = await self._scorer._score_nested_message_async(
+            message=message,
+            expectation=expectation,
         )
+        objective = expectation.objective if expectation else None
 
         # Aggregator handles 0-many scores and returns exactly one result (or raises if configured)
         aggregate_results = self._float_scale_aggregator(scores)
@@ -162,13 +190,13 @@ class FloatScaleThresholdScorer(TrueFalseScorer):
 
         return [score]
 
-    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: Optional[str] = None) -> list[Score]:
+    async def _score_piece_async(self, message_piece: MessagePiece, *, objective: str | None = None) -> list[Score]:
         """
         Float Scale scorers do not support piecewise scoring.
 
         Args:
             message_piece (MessagePiece): Unused.
-            objective (Optional[str]): Unused.
+            objective (str | None): Unused.
 
         Raises:
             NotImplementedError: Always, since composite scoring operates at the response level.

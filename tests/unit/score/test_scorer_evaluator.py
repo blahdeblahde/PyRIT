@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
+from pyrit.memory import MemoryInterface
 from pyrit.models import Message, MessagePiece
 from pyrit.score import (
     FloatScaleScorer,
@@ -26,8 +27,9 @@ from pyrit.score import (
 @pytest.fixture
 def mock_harm_scorer():
     scorer = MagicMock(spec=FloatScaleScorer)
-    scorer._memory = MagicMock()
+    scorer._memory = MagicMock(spec=MemoryInterface)
     scorer._memory.add_message_to_memory = MagicMock()
+    scorer._memory.get_message_pieces.return_value = []
     # Create a mock identifier with a controllable hash property
     mock_identifier = MagicMock()
     mock_identifier.hash = "test_hash_456"
@@ -40,8 +42,9 @@ def mock_harm_scorer():
 @pytest.fixture
 def mock_objective_scorer():
     scorer = MagicMock(spec=TrueFalseScorer)
-    scorer._memory = MagicMock()
+    scorer._memory = MagicMock(spec=MemoryInterface)
     scorer._memory.add_message_to_memory = MagicMock()
+    scorer._memory.get_message_pieces.return_value = []
     # Create a mock identifier with a controllable hash property
     mock_identifier = MagicMock()
     mock_identifier.hash = "test_hash_123"
@@ -65,7 +68,6 @@ def test_from_scorer_objective(mock_objective_scorer):
     assert isinstance(evaluator2, ObjectiveScorerEvaluator)
 
 
-@pytest.mark.asyncio
 async def test_evaluate_dataset_async_harm(mock_harm_scorer):
     responses = [
         Message(message_pieces=[MessagePiece(role="assistant", original_value="test", original_value_data_type="text")])
@@ -91,7 +93,6 @@ async def test_evaluate_dataset_async_harm(mock_harm_scorer):
     assert metrics.mae_standard_error == 0.0
 
 
-@pytest.mark.asyncio
 async def test_evaluate_dataset_async_objective(mock_objective_scorer):
     responses = [
         Message(message_pieces=[MessagePiece(role="assistant", original_value="test", original_value_data_type="text")])
@@ -110,7 +111,6 @@ async def test_evaluate_dataset_async_objective(mock_objective_scorer):
     assert metrics.accuracy_standard_error == 0.0
 
 
-@pytest.mark.asyncio
 async def test_evaluate_dataset_async_objective_returns_metrics(mock_objective_scorer):
     """Test that evaluate_dataset_async returns metrics without registry or file side effects."""
     responses = [
@@ -173,6 +173,9 @@ def test_compute_harm_metrics_perfect_agreement(mock_harm_scorer):
     )
     assert metrics.mean_absolute_error == 0.0
     assert metrics.mae_standard_error == 0.0
+    # Perfect agreement: diff is all zeros, t-test guarded to avoid NaN propagation.
+    assert metrics.t_statistic == 0.0
+    assert metrics.p_value == 1.0
     assert metrics.krippendorff_alpha_combined == 1.0
     assert metrics.krippendorff_alpha_humans == 1.0
     assert metrics.krippendorff_alpha_model == 1.0
@@ -180,13 +183,31 @@ def test_compute_harm_metrics_perfect_agreement(mock_harm_scorer):
 
 def test_compute_harm_metrics_partial_agreement(mock_harm_scorer):
     evaluator = HarmScorerEvaluator(scorer=mock_harm_scorer)
-    # 2 responses, 3 human scores each, model is off by 0.1 for each
+    # 2 responses, 3 human scores each, model is off by 0.1 for each (constant bias, zero variance)
     all_human_scores = np.array([[0.1, 0.2], [0.1, 0.2], [0.1, 0.2]])
     all_model_scores = np.array([[0.2, 0.3], [0.2, 0.3]])
     metrics = evaluator._compute_metrics(
         all_human_scores=all_human_scores, all_model_scores=all_model_scores, num_scorer_trials=2
     )
     assert np.isclose(metrics.mean_absolute_error, 0.1)
+    # Constant non-zero diff has no within-sample variance: t-test undefined, reported as NaN.
+    # MAE captures the bias magnitude.
+    assert np.isnan(metrics.t_statistic)
+    assert np.isnan(metrics.p_value)
+
+
+def test_compute_harm_metrics_partial_agreement_with_variance(mock_harm_scorer):
+    evaluator = HarmScorerEvaluator(scorer=mock_harm_scorer)
+    # Model scores have variance across responses so ttest_1samp is well-defined.
+    all_human_scores = np.array([[0.1, 0.5], [0.1, 0.5], [0.1, 0.5]])
+    all_model_scores = np.array([[0.2, 0.3], [0.2, 0.3]])
+    metrics = evaluator._compute_metrics(
+        all_human_scores=all_human_scores, all_model_scores=all_model_scores, num_scorer_trials=2
+    )
+    # diff = [0.1, -0.2]; both t_statistic and p_value should be finite floats.
+    assert np.isfinite(metrics.t_statistic)
+    assert np.isfinite(metrics.p_value)
+    assert 0.0 <= metrics.p_value <= 1.0
 
 
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.find_objective_metrics_by_eval_hash")
@@ -552,7 +573,6 @@ def test_should_skip_evaluation_harm_definition_version_none_in_existing_runs_ev
     assert result is None
 
 
-@pytest.mark.asyncio
 async def test_evaluate_dataset_async_harm_passes_harm_definition_version(mock_harm_scorer):
     """Test that harm_definition_version from dataset is passed through to metrics."""
     responses = [
@@ -579,7 +599,6 @@ async def test_evaluate_dataset_async_harm_passes_harm_definition_version(mock_h
     assert metrics.dataset_version == "1.0"
 
 
-@pytest.mark.asyncio
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.HumanLabeledDataset.from_csv")
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.SCORER_EVALS_PATH")
 async def test_run_evaluation_async_combines_dataset_versions_with_duplicates(
@@ -654,7 +673,6 @@ async def test_run_evaluation_async_combines_dataset_versions_with_duplicates(
     assert metrics.harm_definition_version == "1.0"
 
 
-@pytest.mark.asyncio
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.HumanLabeledDataset.from_csv")
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.SCORER_EVALS_PATH")
 async def test_run_evaluation_async_combines_mixed_dataset_versions(
@@ -720,7 +738,6 @@ async def test_run_evaluation_async_combines_mixed_dataset_versions(
     assert metrics.harm_definition_version == "1.0"
 
 
-@pytest.mark.asyncio
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.HumanLabeledDataset.from_csv")
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.SCORER_EVALS_PATH")
 async def test_run_evaluation_async_raises_on_mismatched_harm_definition_versions(
@@ -774,7 +791,6 @@ async def test_run_evaluation_async_raises_on_mismatched_harm_definition_version
         )
 
 
-@pytest.mark.asyncio
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.HumanLabeledDataset.from_csv")
 @patch("pyrit.score.scorer_evaluation.scorer_evaluator.SCORER_EVALS_PATH")
 async def test_run_evaluation_async_raises_when_harm_csv_missing_harm_definition(

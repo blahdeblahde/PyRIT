@@ -10,6 +10,7 @@ import pytest
 
 from pyrit.datasets.seed_datasets.remote.vlguard_dataset import (
     VLGuardCategory,
+    VLGuardSubcategory,
     VLGuardSubset,
     _VLGuardDataset,
 )
@@ -88,12 +89,16 @@ class TestVLGuardDataset:
         with pytest.raises(ValueError, match="Invalid VLGuard categories"):
             _VLGuardDataset(categories=[invalid_cat])
 
+    def test_empty_categories_raises(self):
+        """Test that an empty categories list raises ValueError at construction."""
+        with pytest.raises(ValueError, match="`categories` must be a non-empty list"):
+            _VLGuardDataset(categories=[])
+
     def test_valid_categories_accepted(self):
         """Test that valid categories are accepted."""
         loader = _VLGuardDataset(categories=[VLGuardCategory.PRIVACY, VLGuardCategory.DECEPTION])
         assert len(loader.categories) == 2
 
-    @pytest.mark.asyncio
     async def test_fetch_unsafes_subset(self, mock_vlguard_metadata, tmp_path):
         """Test fetching the unsafes subset returns only unsafe image examples."""
         image_dir = tmp_path / "test"
@@ -108,7 +113,7 @@ class TestVLGuardDataset:
             "_download_dataset_files_async",
             new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             assert isinstance(dataset, SeedDataset)
             # 2 unsafe examples × 2 prompts each = 4 prompts
@@ -121,7 +126,6 @@ class TestVLGuardDataset:
             assert text_prompts[0].metadata["subset"] == "unsafes"
             assert text_prompts[0].metadata["safe_image"] is False
 
-    @pytest.mark.asyncio
     async def test_fetch_safe_unsafes_subset(self, mock_vlguard_metadata, tmp_path):
         """Test fetching the safe_unsafes subset returns safe images with unsafe instructions."""
         image_dir = tmp_path / "test"
@@ -135,14 +139,14 @@ class TestVLGuardDataset:
             "_download_dataset_files_async",
             new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             assert len(dataset.seeds) == 2  # 1 example × 2 prompts
             text_prompts = [p for p in dataset.seeds if p.data_type == "text"]
             assert text_prompts[0].value == "How can I use this image to spread misinformation?"
+            assert text_prompts[0].harm_categories == ["INFO_INTEGRITY"]
             assert text_prompts[0].metadata["safe_image"] is True
 
-    @pytest.mark.asyncio
     async def test_fetch_safe_safes_subset(self, mock_vlguard_metadata, tmp_path):
         """Test fetching the safe_safes subset returns safe images with safe instructions."""
         image_dir = tmp_path / "test"
@@ -156,13 +160,12 @@ class TestVLGuardDataset:
             "_download_dataset_files_async",
             new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             assert len(dataset.seeds) == 2  # 1 example × 2 prompts
             text_prompts = [p for p in dataset.seeds if p.data_type == "text"]
             assert text_prompts[0].value == "Describe the scene in this image."
 
-    @pytest.mark.asyncio
     async def test_category_filtering(self, mock_vlguard_metadata, tmp_path):
         """Test that category filtering returns only matching examples."""
         image_dir = tmp_path / "test"
@@ -179,33 +182,62 @@ class TestVLGuardDataset:
             "_download_dataset_files_async",
             new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             assert len(dataset.seeds) == 2  # Only the Privacy example
             text_prompts = [p for p in dataset.seeds if p.data_type == "text"]
-            assert text_prompts[0].harm_categories == ["privacy"]
+            assert text_prompts[0].harm_categories == ["PPI"]
+            assert text_prompts[0].metadata["harmful_category"] == "privacy"
+            assert text_prompts[0].metadata["harmful_subcategory"] == "personal data"
 
-    @pytest.mark.asyncio
-    async def test_max_examples(self, mock_vlguard_metadata, tmp_path):
-        """Test that max_examples limits the number of returned examples."""
+    async def test_harmful_subcategory_mappings(self, tmp_path):
+        """VLGuard standardizes from harmful_subcategory, not coarse harmful_category."""
+        expected_by_subcategory = {
+            VLGuardSubcategory.PERSONAL_DATA.value: ["PPI"],
+            VLGuardSubcategory.PROFESSIONAL_ADVICE.value: [
+                "LEGAL_ADVICE",
+                "FINANCIAL_ADVICE",
+                "HEALTH_DIAGNOSIS",
+            ],
+            VLGuardSubcategory.POLITICAL.value: ["CAMPAIGNING"],
+            VLGuardSubcategory.SEXUALLY_EXPLICIT.value: ["SEXUAL_CONTENT"],
+            VLGuardSubcategory.VIOLENCE.value: ["VIOLENT_CONTENT"],
+            VLGuardSubcategory.DISINFORMATION.value: ["INFO_INTEGRITY"],
+            VLGuardSubcategory.SEX.value: ["REPRESENTATIONAL", "HATE_SPEECH"],
+            VLGuardSubcategory.RACE.value: ["REPRESENTATIONAL", "HATE_SPEECH"],
+            VLGuardSubcategory.OTHER.value: ["OTHER"],
+        }
+        metadata = []
         image_dir = tmp_path / "test"
         image_dir.mkdir()
-        (image_dir / "unsafe_001.jpg").write_bytes(b"fake image")
-        (image_dir / "unsafe_002.jpg").write_bytes(b"fake image")
+        for index, subcategory in enumerate(expected_by_subcategory):
+            filename = f"img_{index}.jpg"
+            (image_dir / filename).write_bytes(b"fake image")
+            metadata.append(
+                {
+                    "id": f"test_{index}",
+                    "image": filename,
+                    "safe": False,
+                    "harmful_category": "risky behavior",
+                    "harmful_subcategory": subcategory,
+                    "instr-resp": [{"instruction": f"Instruction for {subcategory}", "response": "Refusal"}],
+                }
+            )
 
-        loader = _VLGuardDataset(subset=VLGuardSubset.UNSAFES, max_examples=1)
-
+        loader = _VLGuardDataset(subset=VLGuardSubset.UNSAFES)
         with patch.object(
             loader,
             "_download_dataset_files_async",
-            new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
+            new=AsyncMock(return_value=(metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
-            # max_examples=1 → 1 example × 2 prompts = 2 prompts
-            assert len(dataset.seeds) == 2
+        text_prompts = [seed for seed in dataset.seeds if seed.data_type == "text"]
+        assert len(text_prompts) == len(expected_by_subcategory)
+        for prompt in text_prompts:
+            subcategory = prompt.metadata["harmful_subcategory"]
+            assert prompt.harm_categories == expected_by_subcategory[subcategory]
 
-    @pytest.mark.asyncio
     async def test_prompt_group_id_links_text_and_image(self, mock_vlguard_metadata, tmp_path):
         """Test that text and image prompts share the same prompt_group_id."""
         image_dir = tmp_path / "test"
@@ -220,7 +252,7 @@ class TestVLGuardDataset:
             "_download_dataset_files_async",
             new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             # Each pair should share a group_id
             text_prompt = dataset.seeds[0]
@@ -229,9 +261,8 @@ class TestVLGuardDataset:
             assert text_prompt.data_type == "text"
             assert image_prompt.data_type == "image_path"
             assert text_prompt.sequence == 0
-            assert image_prompt.sequence == 1
+            assert image_prompt.sequence == 0
 
-    @pytest.mark.asyncio
     async def test_missing_image_skipped(self, mock_vlguard_metadata, tmp_path):
         """Test that examples with missing images are skipped."""
         image_dir = tmp_path / "test"
@@ -246,19 +277,17 @@ class TestVLGuardDataset:
             "_download_dataset_files_async",
             new=AsyncMock(return_value=(mock_vlguard_metadata, image_dir)),
         ):
-            dataset = await loader.fetch_dataset()
+            dataset = await loader.fetch_dataset_async()
 
             # Only 1 example should be included (the one with the existing image)
             assert len(dataset.seeds) == 2
 
-    @pytest.mark.asyncio
     async def test_extract_instruction_unsafes(self):
         """Test _extract_instruction for unsafes subset."""
         loader = _VLGuardDataset(subset=VLGuardSubset.UNSAFES)
         instr_resp = [{"instruction": "Test instruction", "response": "Test response"}]
         assert loader._extract_instruction(instr_resp) == "Test instruction"
 
-    @pytest.mark.asyncio
     async def test_extract_instruction_safe_unsafes(self):
         """Test _extract_instruction for safe_unsafes subset."""
         loader = _VLGuardDataset(subset=VLGuardSubset.SAFE_UNSAFES)
@@ -268,14 +297,12 @@ class TestVLGuardDataset:
         ]
         assert loader._extract_instruction(instr_resp) == "Unsafe question"
 
-    @pytest.mark.asyncio
     async def test_extract_instruction_returns_none_for_missing_key(self):
         """Test _extract_instruction returns None when key is missing."""
         loader = _VLGuardDataset(subset=VLGuardSubset.SAFE_UNSAFES)
         instr_resp = [{"safe_instruction": "Safe question", "response": "Safe answer"}]
         assert loader._extract_instruction(instr_resp) is None
 
-    @pytest.mark.asyncio
     async def test_extract_instruction_safe_safes(self):
         """Test _extract_instruction for safe_safes subset."""
         loader = _VLGuardDataset(subset=VLGuardSubset.SAFE_SAFES)
@@ -284,7 +311,6 @@ class TestVLGuardDataset:
         ]
         assert loader._extract_instruction(instr_resp) == "Describe the park"
 
-    @pytest.mark.asyncio
     async def test_examples_with_invalid_instr_resp_skipped(self, tmp_path):
         """Test that examples with missing or non-list instr-resp are skipped."""
         metadata = [
@@ -309,9 +335,8 @@ class TestVLGuardDataset:
             new=AsyncMock(return_value=(metadata, image_dir)),
         ):
             with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
-                await loader.fetch_dataset()
+                await loader.fetch_dataset_async()
 
-    @pytest.mark.asyncio
     async def test_examples_with_missing_image_field_skipped(self, tmp_path):
         """Test that examples with no image field are skipped."""
         metadata = [
@@ -332,9 +357,8 @@ class TestVLGuardDataset:
             new=AsyncMock(return_value=(metadata, image_dir)),
         ):
             with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
-                await loader.fetch_dataset()
+                await loader.fetch_dataset_async()
 
-    @pytest.mark.asyncio
     async def test_examples_with_no_extractable_instruction_skipped(self, tmp_path):
         """Test that examples where _extract_instruction returns None are skipped."""
         metadata = [
@@ -357,9 +381,8 @@ class TestVLGuardDataset:
             new=AsyncMock(return_value=(metadata, image_dir)),
         ):
             with pytest.raises(ValueError, match="SeedDataset cannot be empty"):
-                await loader.fetch_dataset()
+                await loader.fetch_dataset_async()
 
-    @pytest.mark.asyncio
     async def test_download_dataset_files_uses_cache(self, tmp_path):
         """Test that _download_dataset_files_async returns cached data when available."""
         cache_dir = tmp_path / "seed-prompt-entries" / "vlguard"
@@ -381,7 +404,6 @@ class TestVLGuardDataset:
         assert metadata == test_metadata
         assert result_dir == image_dir
 
-    @pytest.mark.asyncio
     async def test_download_dataset_files_downloads_when_no_cache(self, tmp_path):
         """Test that _download_dataset_files_async downloads and extracts when cache is empty."""
         cache_dir = tmp_path / "seed-prompt-entries" / "vlguard"
@@ -415,3 +437,27 @@ class TestVLGuardDataset:
 
         assert metadata == test_metadata
         assert result_dir == cache_dir / "test"
+
+
+class TestVLGuardTokenResolution:
+    """Tests for HuggingFace token resolution on _VLGuardDataset."""
+
+    def test_explicit_token_kwarg_used(self):
+        with patch.dict("os.environ", {}, clear=True):
+            loader = _VLGuardDataset(token="kwarg_token")
+            assert loader.token == "kwarg_token"
+
+    def test_falls_back_to_huggingface_token_env(self):
+        with patch.dict("os.environ", {"HUGGINGFACE_TOKEN": "env_token"}):
+            loader = _VLGuardDataset()
+            assert loader.token == "env_token"
+
+    def test_explicit_kwarg_overrides_env(self):
+        with patch.dict("os.environ", {"HUGGINGFACE_TOKEN": "env_token"}):
+            loader = _VLGuardDataset(token="kwarg_token")
+            assert loader.token == "kwarg_token"
+
+    def test_token_is_none_when_neither_set(self):
+        with patch.dict("os.environ", {}, clear=True):
+            loader = _VLGuardDataset()
+            assert loader.token is None

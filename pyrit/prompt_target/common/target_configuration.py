@@ -2,9 +2,7 @@
 # Licensed under the MIT license.
 
 import logging
-import warnings
 from collections.abc import Mapping
-from dataclasses import fields
 from typing import Any
 
 from pyrit.message_normalizer import MessageListNormalizer
@@ -18,46 +16,6 @@ from pyrit.prompt_target.common.target_capabilities import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def resolve_configuration_compat(
-    *,
-    custom_configuration: "TargetConfiguration | None",
-    custom_capabilities: TargetCapabilities | None,
-) -> "TargetConfiguration | None":
-    """
-    Resolve the deprecated ``custom_capabilities`` parameter.
-
-    If the caller supplied the old ``custom_capabilities`` keyword, emit a
-    :class:`DeprecationWarning` and wrap the value in a
-    :class:`TargetConfiguration`.  Passing both parameters is an error.
-
-    Args:
-        custom_configuration (TargetConfiguration | None): The new-style configuration object.
-        custom_capabilities (TargetCapabilities | None): The deprecated capabilities object.
-
-    Returns:
-        The resolved :class:`TargetConfiguration`, or *None* when neither
-        parameter was supplied.
-
-    Raises:
-        ValueError: If both parameters were supplied.
-    """
-    if custom_capabilities is not None and custom_configuration is not None:
-        raise ValueError(
-            "Cannot specify both 'custom_capabilities' and 'custom_configuration'. "
-            "Use 'custom_configuration' only; 'custom_capabilities' is deprecated and"
-            " will be removed in v0.14.0."
-        )
-    if custom_capabilities is not None:
-        warnings.warn(
-            "'custom_capabilities' is deprecated and will be removed in v0.14.0. "
-            "Use 'custom_configuration=TargetConfiguration(capabilities=...)' instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        return TargetConfiguration(capabilities=custom_capabilities)
-    return custom_configuration
 
 
 # Default policy: RAISE on all adaptable capabilities.
@@ -176,9 +134,9 @@ class TargetConfiguration:
     def as_identifier_params(self) -> dict[str, Any]:
         """
         Return a deterministic, serializable representation of this configuration
-        suitable for inclusion in a :class:`ComponentIdentifier`.
+        suitable for inclusion in a ``ComponentIdentifier``.
 
-        The returned dict preserves the structure of :class:`TargetConfiguration`
+        The returned dict preserves the structure of ``TargetConfiguration``
         — capabilities, policy, and pipeline are kept as nested sub-dicts rather
         than flattened into the caller — so the identifier reflects the shape of
         the object it describes.
@@ -215,10 +173,10 @@ class TargetConfiguration:
     @staticmethod
     def _capabilities_to_identifier_params(capabilities: TargetCapabilities) -> dict[str, Any]:
         """
-        Project a :class:`TargetCapabilities` instance into a deterministic dict
-        suitable for inclusion in a :class:`ComponentIdentifier`.
+        Project a ``TargetCapabilities`` instance into a deterministic dict
+        suitable for inclusion in a ``ComponentIdentifier``.
 
-        Fields are discovered dynamically via ``dataclasses.fields`` so new
+        Fields are discovered dynamically via the pydantic model fields so new
         capability fields are picked up automatically. Set-valued fields (e.g.,
         the modality frozensets) are detected by type and normalized to sorted
         lists of sorted lists; all other fields are passed through as-is.
@@ -230,15 +188,15 @@ class TargetConfiguration:
             dict[str, Any]: Field-name to serialized-value mapping.
         """
         params: dict[str, Any] = {}
-        for dataclass_field in fields(capabilities):
-            value = getattr(capabilities, dataclass_field.name)
+        for field_name in type(capabilities).model_fields:
+            value = getattr(capabilities, field_name)
             # Normalize set-valued fields (e.g., modality frozensets) to a
             # deterministic representation. Handles both frozenset[frozenset[...]]
             # (modality combinations) and plain frozensets.
             if isinstance(value, (frozenset, set)):
-                params[dataclass_field.name] = sorted(
+                params[field_name] = sorted(
                     sorted(item) if isinstance(item, (frozenset, set)) else item for item in value
                 )
             else:
-                params[dataclass_field.name] = value
+                params[field_name] = value
         return params

@@ -7,27 +7,21 @@ import abc
 import logging
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from scipy.stats import ttest_1samp
 
 from pyrit.common.path import SCORER_EVALS_PATH
+from pyrit.score.message_scorer import extract_objective_from_previous_turn
 from pyrit.score.scorer_evaluation.human_labeled_dataset import (
     HarmHumanLabeledEntry,
     HumanLabeledDataset,
     ObjectiveHumanLabeledEntry,
 )
 from pyrit.score.scorer_evaluation.krippendorff import krippendorff_alpha
-from pyrit.score.scorer_evaluation.metrics_type import (
-    MetricsType,
-    RegistryUpdateBehavior,
-)
-from pyrit.score.scorer_evaluation.scorer_metrics import (
-    HarmScorerMetrics,
-    ObjectiveScorerMetrics,
-    ScorerMetrics,
-)
+from pyrit.score.scorer_evaluation.metrics_type import MetricsType, RegistryUpdateBehavior
+from pyrit.score.scorer_evaluation.scorer_metrics import HarmScorerMetrics, ObjectiveScorerMetrics, ScorerMetrics
 from pyrit.score.scorer_evaluation.scorer_metrics_io import (
     find_harm_metrics_by_eval_hash,
     find_objective_metrics_by_eval_hash,
@@ -43,13 +37,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Standard column names for evaluation datasets
-STANDARD_HUMAN_LABEL_COL = "human_score"
-STANDARD_OBJECTIVE_COL = "objective"
-STANDARD_HARM_COL = "harm_category"
-STANDARD_ASSISTANT_RESPONSE_COL = "assistant_response"
-STANDARD_DATA_TYPE_COL = "data_type"
-
 
 @dataclass
 class ScorerEvalDatasetFiles:
@@ -60,17 +47,17 @@ class ScorerEvalDatasetFiles:
     Multiple files matching the patterns will be concatenated before evaluation.
 
     Args:
-        human_labeled_datasets_files (List[str]): List of glob patterns to match CSV files.
+        human_labeled_datasets_files (list[str]): List of glob patterns to match CSV files.
             Examples: ``["objective/*.csv"]``, ``["objective/hate_speech.csv", "objective/violence.csv"]``
         result_file (str): Name of the result file (stem used as dict key in results).
             Example: ``"objective_achieved_metrics.jsonl"``
-        harm_category (Optional[str]): The harm category for harm scorers (e.g., "hate_speech", "violence").
+        harm_category (str | None): The harm category for harm scorers (e.g., "hate_speech", "violence").
             Required for harm evaluations, ignored for objective evaluations. Defaults to None.
     """
 
     human_labeled_datasets_files: list[str]
     result_file: str
-    harm_category: Optional[str] = None
+    harm_category: str | None = None
 
 
 class ScorerEvaluator(abc.ABC):
@@ -82,7 +69,7 @@ class ScorerEvaluator(abc.ABC):
     # Subclasses must define the expected metrics type
     expected_metrics_type: MetricsType
 
-    def __init__(self, scorer: Scorer):
+    def __init__(self, scorer: Scorer) -> None:
         """
         Initialize the ScorerEvaluator with a scorer.
 
@@ -92,7 +79,7 @@ class ScorerEvaluator(abc.ABC):
         self.scorer = scorer
 
     @classmethod
-    def from_scorer(cls, scorer: Scorer, metrics_type: Optional[MetricsType] = None) -> ScorerEvaluator:
+    def from_scorer(cls, scorer: Scorer, metrics_type: MetricsType | None = None) -> ScorerEvaluator:
         """
         Create a ScorerEvaluator based on the type of scoring.
 
@@ -120,7 +107,7 @@ class ScorerEvaluator(abc.ABC):
         num_scorer_trials: int = 3,
         update_registry_behavior: RegistryUpdateBehavior = RegistryUpdateBehavior.SKIP_IF_EXISTS,
         max_concurrency: int = 10,
-    ) -> Optional[ScorerMetrics]:
+    ) -> ScorerMetrics | None:
         """
         Evaluate scorer using dataset files configuration.
 
@@ -265,11 +252,11 @@ class ScorerEvaluator(abc.ABC):
         self,
         *,
         dataset_version: str,
-        harm_definition_version: Optional[str] = None,
+        harm_definition_version: str | None = None,
         num_scorer_trials: int,
-        harm_category: Optional[str] = None,
+        harm_category: str | None = None,
         result_file_path: Path,
-    ) -> tuple[bool, Optional[ScorerMetrics]]:
+    ) -> tuple[bool, ScorerMetrics | None]:
         """
         Determine whether to skip evaluation based on existing registry entries.
 
@@ -282,13 +269,13 @@ class ScorerEvaluator(abc.ABC):
 
         Args:
             dataset_version (str): The version of the dataset.
-            harm_definition_version (Optional[str]): Version of the harm definition YAML. For harm evaluations.
+            harm_definition_version (str | None): Version of the harm definition YAML. For harm evaluations.
             num_scorer_trials (int): Number of scorer trials requested.
-            harm_category (Optional[str]): The harm category for harm scorers. Required for harm evaluations.
+            harm_category (str | None): The harm category for harm scorers. Required for harm evaluations.
             result_file_path (Path): Path to the result file to search.
 
         Returns:
-            Tuple[bool, Optional[ScorerMetrics]]: (should_skip, existing_metrics)
+            tuple[bool, ScorerMetrics | None]: (should_skip, existing_metrics)
                 - (True, metrics) if should skip and use existing metrics
                 - (False, None) if should run evaluation
         """
@@ -302,7 +289,7 @@ class ScorerEvaluator(abc.ABC):
             # Determine if this is a harm or objective evaluation
             metrics_type = MetricsType.OBJECTIVE if isinstance(self.scorer, TrueFalseScorer) else MetricsType.HARM
 
-            existing: Optional[ScorerMetrics] = None
+            existing: ScorerMetrics | None = None
             if metrics_type == MetricsType.HARM:
                 if harm_category is None:
                     logger.warning("harm_category must be provided for harm scorer evaluations")
@@ -388,6 +375,12 @@ class ScorerEvaluator(abc.ABC):
         # Validate dataset and extract data
         assistant_responses, human_scores_list, objectives = self._validate_and_extract_data(labeled_dataset)
 
+        # Harm datasets carry no objective, so the previous turn stands in for one.
+        resolved_objectives = objectives or [
+            extract_objective_from_previous_turn(message=response, memory=self.scorer._memory)
+            for response in assistant_responses
+        ]
+
         # Transpose human scores so each row is a complete set of scores across all responses
         all_human_scores = np.array(human_scores_list).T
 
@@ -399,9 +392,8 @@ class ScorerEvaluator(abc.ABC):
             start_time = time.perf_counter()
             scores = await self.scorer.score_prompts_batch_async(
                 messages=assistant_responses,
-                objectives=objectives,
+                objectives=resolved_objectives,
                 batch_size=max_concurrency,
-                infer_objective_from_request=True,
             )
             elapsed_time = time.perf_counter() - start_time
             total_scoring_time += elapsed_time
@@ -449,7 +441,7 @@ class ScorerEvaluator(abc.ABC):
     def _validate_and_extract_data(
         self,
         labeled_dataset: HumanLabeledDataset,
-    ) -> tuple[list[Message], list[list[float]], Optional[list[str]]]:
+    ) -> tuple[list[Message], list[list[float]], list[str] | None]:
         """
         Validate the dataset and extract data for evaluation.
 
@@ -468,14 +460,14 @@ class ScorerEvaluator(abc.ABC):
     def _compute_metrics(
         self,
         *,
-        all_human_scores: np.ndarray,  # type: ignore[type-arg, unused-ignore]
-        all_model_scores: np.ndarray,  # type: ignore[type-arg, unused-ignore]
+        all_human_scores: np.ndarray,
+        all_model_scores: np.ndarray,
         num_scorer_trials: int,
-        dataset_name: Optional[str] = None,
-        dataset_version: Optional[str] = None,
-        harm_category: Optional[str] = None,
-        harm_definition: Optional[str] = None,
-        harm_definition_version: Optional[str] = None,
+        dataset_name: str | None = None,
+        dataset_version: str | None = None,
+        harm_category: str | None = None,
+        harm_definition: str | None = None,
+        harm_definition_version: str | None = None,
     ) -> ScorerMetrics:
         """
         Compute evaluation metrics from human and model scores.
@@ -532,7 +524,7 @@ class HarmScorerEvaluator(ScorerEvaluator):
     def _validate_and_extract_data(
         self,
         labeled_dataset: HumanLabeledDataset,
-    ) -> tuple[list[Message], list[list[float]], Optional[list[str]]]:
+    ) -> tuple[list[Message], list[list[float]], list[str] | None]:
         """
         Validate harm dataset and extract evaluation data.
 
@@ -541,7 +533,8 @@ class HarmScorerEvaluator(ScorerEvaluator):
 
         Returns:
             Tuple of (assistant_responses, human_scores_list, None).
-            objectives is None for harm scoring (uses infer_objective_from_request).
+            objectives is None for harm scoring; the caller reads each objective from the
+            previous turn instead.
 
         Raises:
             ValueError: If dataset is not HARM type or has multiple harm categories.
@@ -566,14 +559,14 @@ class HarmScorerEvaluator(ScorerEvaluator):
     def _compute_metrics(
         self,
         *,
-        all_human_scores: np.ndarray,  # type: ignore[type-arg, unused-ignore]
-        all_model_scores: np.ndarray,  # type: ignore[type-arg, unused-ignore]
+        all_human_scores: np.ndarray,
+        all_model_scores: np.ndarray,
         num_scorer_trials: int,
-        dataset_name: Optional[str] = None,
-        dataset_version: Optional[str] = None,
-        harm_category: Optional[str] = None,
-        harm_definition: Optional[str] = None,
-        harm_definition_version: Optional[str] = None,
+        dataset_name: str | None = None,
+        dataset_version: str | None = None,
+        harm_category: str | None = None,
+        harm_definition: str | None = None,
+        harm_definition_version: str | None = None,
     ) -> HarmScorerMetrics:
         reliability_data = np.concatenate((all_human_scores, all_model_scores))
         # Calculate the median of human scores for each response, which is considered the gold label
@@ -585,7 +578,21 @@ class HarmScorerEvaluator(ScorerEvaluator):
         diff[np.abs(diff) < 1e-10] = 0.0
 
         abs_error = np.abs(diff)
-        t_statistic, p_value = cast("tuple[float, float]", ttest_1samp(diff, 0))
+        # ttest_1samp on a zero-variance sample returns NaN and emits scipy
+        # divide-by-zero / catastrophic-cancellation warnings. Two degenerate cases
+        # warrant explicit handling (np.allclose tolerates the float noise that
+        # creeps in from `np.median(...)` differences):
+        #   - Perfect agreement (diff effectively all zeros): the null hypothesis
+        #     (mean diff = 0) is exactly satisfied, so report t=0.0, p=1.0.
+        #   - Systematic bias with no variance (constant non-zero diff): the t-test
+        #     is undefined; report NaN explicitly. MAE captures the bias magnitude.
+        if diff.size > 0 and np.allclose(diff, diff[0]):
+            if np.isclose(diff[0], 0.0):
+                t_statistic, p_value = 0.0, 1.0
+            else:
+                t_statistic, p_value = float("nan"), float("nan")
+        else:
+            t_statistic, p_value = cast("tuple[float, float]", ttest_1samp(diff, 0))
 
         num_responses = all_human_scores.shape[1]
         num_human_raters = all_human_scores.shape[0]
@@ -633,7 +640,7 @@ class ObjectiveScorerEvaluator(ScorerEvaluator):
     def _validate_and_extract_data(
         self,
         labeled_dataset: HumanLabeledDataset,
-    ) -> tuple[list[Message], list[list[float]], Optional[list[str]]]:
+    ) -> tuple[list[Message], list[list[float]], list[str] | None]:
         """
         Validate objective dataset and extract evaluation data.
 
@@ -668,14 +675,14 @@ class ObjectiveScorerEvaluator(ScorerEvaluator):
     def _compute_metrics(
         self,
         *,
-        all_human_scores: np.ndarray,  # type: ignore[type-arg, unused-ignore]
-        all_model_scores: np.ndarray,  # type: ignore[type-arg, unused-ignore]
+        all_human_scores: np.ndarray,
+        all_model_scores: np.ndarray,
         num_scorer_trials: int,
-        dataset_name: Optional[str] = None,
-        dataset_version: Optional[str] = None,
-        harm_category: Optional[str] = None,
-        harm_definition: Optional[str] = None,
-        harm_definition_version: Optional[str] = None,
+        dataset_name: str | None = None,
+        dataset_version: str | None = None,
+        harm_category: str | None = None,
+        harm_definition: str | None = None,
+        harm_definition_version: str | None = None,
     ) -> ObjectiveScorerMetrics:
         # Calculate the majority vote of human scores for each response, which is considered the gold label.
         # If the vote is split, the resulting gold score will be 0 (i.e. False). Same logic is applied to model trials.

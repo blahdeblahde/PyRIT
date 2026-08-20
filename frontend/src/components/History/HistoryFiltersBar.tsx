@@ -21,6 +21,7 @@ const NO_CONVERTERS_SENTINEL = '__no_converters__'
 const OUTCOME_LABELS: Record<string, string> = {
   success: 'Success',
   failure: 'Failure',
+  error: 'Error',
   undetermined: 'Undetermined',
 }
 
@@ -169,6 +170,7 @@ export default function HistoryFiltersBar({
       {hasActiveFilters && (
         <Tooltip content="Reset all filters" relationship="label">
           <Button
+            className={styles.touchTargetHeight}
             appearance="subtle"
             size="small"
             icon={<FilterDismissRegular />}
@@ -200,6 +202,7 @@ export default function HistoryFiltersBar({
         <Option value="">All outcomes</Option>
         <Option value="success">Success</Option>
         <Option value="failure">Failure</Option>
+        <Option value="error">Error</Option>
         <Option value="undetermined">Undetermined</Option>
       </Combobox>
       <Combobox
